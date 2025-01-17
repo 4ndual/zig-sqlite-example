@@ -1,0 +1,16 @@
+.{
+    .name = "zig-sqlite-example",
+
+    .version = "0.0.0",
+
+    .dependencies = .{
+        .sqlite = .{
+            .path = "lib/zig-sqllite",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
