@@ -1,14 +1,23 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
 
+// Define the Employee struct for reading data
+const Employee = struct {
+    id: i64,
+    name: [100:0]u8, // 0-terminated array for name
+    age: i64,
+    salary: i64,
+};
+
 // Function to display the menu
 fn displayMenu(writer: anytype) !void {
     try writer.print("\n=== Employee Management System ===\n", .{});
     try writer.print("1. Add Employee\n", .{});
-    try writer.print("2. Update Employee\n", .{});
-    try writer.print("3. Delete Employee\n", .{});
-    try writer.print("4. Exit\n", .{});
-    try writer.print("Enter your choice (1-4): ", .{});
+    try writer.print("2. View Employees\n", .{});
+    try writer.print("3. Update Employee\n", .{});
+    try writer.print("4. Delete Employee\n", .{});
+    try writer.print("5. Exit\n", .{});
+    try writer.print("Enter your choice (1-5): ", .{});
 }
 
 fn readLine(reader: anytype, buffer: []u8) !?[]const u8 {
@@ -18,6 +27,32 @@ fn readLine(reader: anytype, buffer: []u8) !?[]const u8 {
         return std.mem.trim(u8, line[0 .. line.len - 1], &std.ascii.whitespace);
     }
     return std.mem.trim(u8, line, &std.ascii.whitespace);
+}
+
+fn displayEmployees(db: *sqlite.Db, writer: anytype) !void {
+    var stmt = try db.prepare("SELECT id, name, age, salary FROM employees ORDER BY id");
+    defer stmt.deinit();
+
+    // Print table header
+    try writer.print("\n{s: <5} {s: <20} {s: <8} {s: <10}\n", .{ "ID", "Name", "Age", "Salary" });
+    try writer.print("{s}\n", .{"-" ** 45});
+
+    // Create an iterator for employees
+    var iter = try stmt.iterator(Employee, .{});
+
+    // Iterate through all employees
+    while (try iter.next(.{})) |employee| {
+        const name = std.mem.span(@as([*:0]const u8, &employee.name));
+        try writer.print("{d: <5} {s: <20} {d: <8} {d: <10}\n", .{ employee.id, name, employee.age, employee.salary });
+    }
+    try writer.print("\n", .{});
+}
+
+fn getEmployee(db: *sqlite.Db, id: i64) !?Employee {
+    var stmt = try db.prepare("SELECT id, name, age, salary FROM employees WHERE id = ?1");
+    defer stmt.deinit();
+
+    return try stmt.one(Employee, .{}, .{id});
 }
 
 pub fn main() !void {
@@ -48,7 +83,7 @@ pub fn main() !void {
 
         if (try readLine(stdin, &choice_buffer)) |choice_input| {
             const choice = std.fmt.parseInt(u8, choice_input, 10) catch {
-                try stdout.print("Invalid input. Please enter a number between 1 and 4.\n", .{});
+                try stdout.print("Invalid input. Please enter a number between 1 and 5.\n", .{});
                 continue;
             };
 
@@ -81,7 +116,12 @@ pub fn main() !void {
                     try stmt.exec(.{}, .{ name, age, salary });
                     try stdout.print("Employee added successfully!\n", .{});
                 },
-                2 => { // Update Employee
+                2 => { // View Employees
+                    try displayEmployees(&db, stdout);
+                },
+                3 => { // Update Employee
+                    try displayEmployees(&db, stdout);
+
                     try stdout.print("\nEnter employee ID to update: ", .{});
                     const id_input = (try readLine(stdin, &id_buffer)) orelse break;
                     const id = std.fmt.parseInt(i64, id_input, 10) catch {
@@ -89,55 +129,59 @@ pub fn main() !void {
                         continue;
                     };
 
-                    try stdout.print("Enter new name (or press enter to skip): ", .{});
-                    const name = (try readLine(stdin, &name_buffer)) orelse break;
+                    // First check if employee exists
+                    if (try getEmployee(&db, id)) |_| {
+                        try stdout.print("Enter new name (or press enter to skip): ", .{});
+                        const name = (try readLine(stdin, &name_buffer)) orelse break;
 
-                    try stdout.print("Enter new age (or 0 to skip): ", .{});
-                    const age_input = (try readLine(stdin, &age_buffer)) orelse break;
-                    const age = std.fmt.parseInt(i64, age_input, 10) catch {
-                        try stdout.print("Invalid age format.\n", .{});
-                        continue;
-                    };
+                        try stdout.print("Enter new age (or 0 to skip): ", .{});
+                        const age_input = (try readLine(stdin, &age_buffer)) orelse break;
+                        const age = std.fmt.parseInt(i64, age_input, 10) catch {
+                            try stdout.print("Invalid age format.\n", .{});
+                            continue;
+                        };
 
-                    try stdout.print("Enter new salary (or 0 to skip): ", .{});
-                    const salary_input = (try readLine(stdin, &salary_buffer)) orelse break;
-                    const salary = std.fmt.parseInt(i64, salary_input, 10) catch {
-                        try stdout.print("Invalid salary format.\n", .{});
-                        continue;
-                    };
+                        try stdout.print("Enter new salary (or 0 to skip): ", .{});
+                        const salary_input = (try readLine(stdin, &salary_buffer)) orelse break;
+                        const salary = std.fmt.parseInt(i64, salary_input, 10) catch {
+                            try stdout.print("Invalid salary format.\n", .{});
+                            continue;
+                        };
 
-                    // Debug print before update
-                    try stdout.print("Debug - About to update ID {}: name='{s}', age={}, salary={}\n", .{ id, name, age, salary });
+                        if (name.len > 0) {
+                            var stmt = try db.prepare("UPDATE employees SET name = ?1 WHERE id = ?2");
+                            defer stmt.deinit();
+                            try stmt.exec(.{}, .{ name, id });
+                            try stdout.print("Name updated.\n", .{});
+                        }
 
-                    if (name.len > 0) {
-                        var stmt = try db.prepare("UPDATE employees SET name = ?1 WHERE id = ?2");
-                        defer stmt.deinit();
-                        try stmt.exec(.{}, .{ name, id });
-                        try stdout.print("Name updated.\n", .{});
+                        if (age > 0) {
+                            var stmt = try db.prepare("UPDATE employees SET age = ?1 WHERE id = ?2");
+                            defer stmt.deinit();
+                            try stmt.exec(.{}, .{ age, id });
+                            try stdout.print("Age updated.\n", .{});
+                        }
+
+                        if (salary > 0) {
+                            var stmt = try db.prepare("UPDATE employees SET salary = ?1 WHERE id = ?2");
+                            defer stmt.deinit();
+                            try stmt.exec(.{}, .{ salary, id });
+                            try stdout.print("Salary updated.\n", .{});
+                        }
+
+                        if (name.len == 0 and age == 0 and salary == 0) {
+                            try stdout.print("No fields to update!\n", .{});
+                            continue;
+                        }
+
+                        try stdout.print("Employee update completed!\n", .{});
+                    } else {
+                        try stdout.print("Employee not found!\n", .{});
                     }
-
-                    if (age > 0) {
-                        var stmt = try db.prepare("UPDATE employees SET age = ?1 WHERE id = ?2");
-                        defer stmt.deinit();
-                        try stmt.exec(.{}, .{ age, id });
-                        try stdout.print("Age updated.\n", .{});
-                    }
-
-                    if (salary > 0) {
-                        var stmt = try db.prepare("UPDATE employees SET salary = ?1 WHERE id = ?2");
-                        defer stmt.deinit();
-                        try stmt.exec(.{}, .{ salary, id });
-                        try stdout.print("Salary updated.\n", .{});
-                    }
-
-                    if (name.len == 0 and age == 0 and salary == 0) {
-                        try stdout.print("No fields to update!\n", .{});
-                        continue;
-                    }
-
-                    try stdout.print("Employee update completed!\n", .{});
                 },
-                3 => { // Delete Employee
+                4 => { // Delete Employee
+                    try displayEmployees(&db, stdout);
+
                     try stdout.print("\nEnter employee ID to delete: ", .{});
                     const id_input = (try readLine(stdin, &id_buffer)) orelse break;
                     const id = std.fmt.parseInt(i64, id_input, 10) catch {
@@ -145,14 +189,18 @@ pub fn main() !void {
                         continue;
                     };
 
-                    var stmt = try db.prepare("DELETE FROM employees WHERE id = ?1");
-                    defer stmt.deinit();
+                    if (try getEmployee(&db, id)) |_| {
+                        var stmt = try db.prepare("DELETE FROM employees WHERE id = ?1");
+                        defer stmt.deinit();
 
-                    try stmt.exec(.{}, .{id});
-                    try stdout.print("Employee deleted successfully!\n", .{});
+                        try stmt.exec(.{}, .{id});
+                        try stdout.print("Employee deleted successfully!\n", .{});
+                    } else {
+                        try stdout.print("Employee not found!\n", .{});
+                    }
                 },
-                4 => break,
-                else => try stdout.print("Invalid choice. Please enter a number between 1 and 4.\n", .{}),
+                5 => break,
+                else => try stdout.print("Invalid choice. Please enter a number between 1 and 5.\n", .{}),
             }
         } else {
             break;
