@@ -1,25 +1,88 @@
 const std = @import("std");
 const sqlite = @import("sqlite");
+const json = std.json;
 
-// Define the Employee struct for reading data
 const Employee = struct {
     id: i64,
-    name: [100:0]u8, // 0-terminated array for name
+    name: [100:0]u8,
     age: i64,
     salary: i64,
 };
 
-// Function to display the menu
 fn displayMenu(writer: anytype) !void {
     try writer.print("\n=== Employee Management System ===\n", .{});
     try writer.print("1. Add Employee\n", .{});
     try writer.print("2. View Employees\n", .{});
     try writer.print("3. Update Employee\n", .{});
     try writer.print("4. Delete Employee\n", .{});
-    try writer.print("5. Exit\n", .{});
-    try writer.print("Enter your choice (1-5): ", .{});
+    try writer.print("5. Import Employees from JSON\n", .{});
+    try writer.print("6. Exit\n", .{});
+    try writer.print("Enter your choice (1-6): ", .{});
 }
 
+fn importEmployeesFromJson(db: *sqlite.Db, allocator: std.mem.Allocator, filename: []const u8) !usize {
+    const file = try std.fs.cwd().openFile(filename, .{});
+    defer file.close();
+
+    const content = try file.readToEndAlloc(allocator, try file.getEndPos());
+    defer allocator.free(content);
+
+    std.debug.print("Reading JSON content:\n{s}\n", .{content});
+
+    var parsed_value = try std.json.parseFromSlice(
+        json.Value,
+        allocator,
+        content,
+        .{},
+    );
+    defer parsed_value.deinit();
+
+    if (parsed_value.value != .array) {
+        std.debug.print("Error: Expected array at root\n", .{});
+        return error.InvalidJsonFormat;
+    }
+
+    try db.exec("BEGIN TRANSACTION", .{}, .{});
+
+    const query =
+        \\INSERT INTO employees(name, age, salary) 
+        \\VALUES (?, ?, ?)
+    ;
+
+    var stmt = try db.prepare(query);
+    defer stmt.deinit();
+
+    var count: usize = 0;
+
+    for (parsed_value.value.array.items) |item| {
+        if (item != .object) continue;
+        const obj = item.object;
+
+        const name = obj.get("name") orelse continue;
+        const age = obj.get("age") orelse continue;
+        const salary = obj.get("salary") orelse continue;
+
+        if (name != .string or age != .integer or salary != .integer) continue;
+        if (name.string.len >= 100) {
+            std.debug.print("Warning: Name too long: {s}\n", .{name.string});
+            continue;
+        }
+
+        stmt.reset();
+        try stmt.exec(.{}, .{ name.string, @as(i64, age.integer), @as(i64, salary.integer) });
+
+        count += 1;
+        std.debug.print("Inserted: name={s}, age={d}, salary={d}\n", .{
+            name.string,
+            age.integer,
+            salary.integer,
+        });
+    }
+
+    try db.exec("COMMIT", .{}, .{});
+
+    return count;
+}
 fn readLine(reader: anytype, buffer: []u8) !?[]const u8 {
     @memset(buffer, 0);
     const line = (try reader.readUntilDelimiterOrEof(buffer, '\n')) orelse return null;
@@ -33,14 +96,11 @@ fn displayEmployees(db: *sqlite.Db, writer: anytype) !void {
     var stmt = try db.prepare("SELECT id, name, age, salary FROM employees ORDER BY id");
     defer stmt.deinit();
 
-    // Print table header
     try writer.print("\n{s: <5} {s: <20} {s: <8} {s: <10}\n", .{ "ID", "Name", "Age", "Salary" });
     try writer.print("{s}\n", .{"-" ** 45});
 
-    // Create an iterator for employees
     var iter = try stmt.iterator(Employee, .{});
 
-    // Iterate through all employees
     while (try iter.next(.{})) |employee| {
         const name = std.mem.span(@as([*:0]const u8, &employee.name));
         try writer.print("{d: <5} {s: <20} {d: <8} {d: <10}\n", .{ employee.id, name, employee.age, employee.salary });
@@ -56,6 +116,9 @@ fn getEmployee(db: *sqlite.Db, id: i64) !?Employee {
 }
 
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
     var db = try sqlite.Db.init(.{
         .mode = sqlite.Db.Mode{ .File = "test.db" },
         .open_flags = .{
@@ -77,6 +140,7 @@ pub fn main() !void {
     var name_buffer: [100]u8 = undefined;
     var age_buffer: [16]u8 = undefined;
     var salary_buffer: [32]u8 = undefined;
+    var filename_buffer: [256]u8 = undefined;
 
     while (true) {
         try displayMenu(stdout);
@@ -199,7 +263,22 @@ pub fn main() !void {
                         try stdout.print("Employee not found!\n", .{});
                     }
                 },
-                5 => break,
+                5 => { // Import from JSON
+                    try stdout.print("Enter JSON file path: ", .{});
+                    const filename = (try readLine(stdin, &filename_buffer)) orelse break;
+
+                    const imported_count = importEmployeesFromJson(&db, allocator, filename) catch |err| {
+                        switch (err) {
+                            error.FileNotFound => try stdout.print("File not found: {s}\n", .{filename}),
+                            error.InvalidCharacter, error.UnexpectedEndOfInput => try stdout.print("Invalid JSON format in file: {s}\n", .{filename}),
+                            else => try stdout.print("Error importing data: {any}\n", .{err}),
+                        }
+                        continue;
+                    };
+
+                    try stdout.print("Successfully imported {d} employees from JSON.\n", .{imported_count});
+                },
+                6 => break,
                 else => try stdout.print("Invalid choice. Please enter a number between 1 and 5.\n", .{}),
             }
         } else {
